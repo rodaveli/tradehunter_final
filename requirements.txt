@@ -1,0 +1,17 @@
+openai
+openrouter
+yfinance
+edgartools
+pyfinmod
+exa_py
+instructor
+ta
+feedparser
+beautifulsoup4
+schedule
+requests
+pandas
+numpy
+python-dotenv
+logging
+python-dotenv
