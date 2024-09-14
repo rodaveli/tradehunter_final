@@ -27,6 +27,67 @@ config = {
     'RSS_FEEDS': RSS_FEEDS,
 }
 
+
+@rate_limit(5)
+def is_special_situation(article_content, config):
+    # Use a fast, cheap LLM to determine if the article describes a special situation
+    prompt = f"""
+    Analyze the following article content and determine if it describes any of the following:
+
+    - A corporate action (e.g., merger, acquisition, spinoff, rights offering)
+    - A special situation or workout
+    - A clear catalyst for short-term price movement
+
+    Provide a JSON object with a single key "is_special_situation" and a boolean value (true or false). Do not include any additional text.
+
+    Content: {article_content}
+
+    Example output format:
+    {{"is_special_situation": true}}
+    """
+    headers = {
+        "Authorization": f"Bearer {config['OPENROUTER_API_KEY']}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": config['FAST_LLM'],
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that analyzes text and determines if it describes a special situation, returning a JSON object."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            response_text = result['choices'][0]['message']['content'].strip()
+
+            # Parse the JSON response
+            response_json = json.loads(response_text)
+
+            if not isinstance(response_json, dict) or "is_special_situation" not in response_json:
+                raise ValueError("Expected a JSON object with key 'is_special_situation'")
+
+            return response_json["is_special_situation"]
+
+        except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
+            if attempt == max_retries - 1:
+                print(f"Error determining special situation after {max_retries} attempts: {str(e)}")
+                return False
+            time.sleep(2 ** attempt)  # Exponential backoff
+
+    return False
+
 @rate_limit(5)
 def extract_tickers(article_content, config):
     # Use a fast, cheap LLM to extract company names
@@ -159,22 +220,26 @@ def main():
             # Check if market cap is under $100 million
             market_cap = stock_data.info.get('marketCap', 0)
             if market_cap and market_cap < 100_000_000:
-                # Proceed to final stage 1 filter
                 # Determine if it's a special situation or obvious price catalyst
-                # For simplicity, we'll assume it passes this filter
-                financials = data_processor.get_financials(ticker)
-                sec_filings = data_processor.get_sec_filings(ticker)
+                if is_special_situation(article['description'], config):
+                    # Proceed with analysis
+                    financials = data_processor.get_financials(ticker)
+                    sec_filings = data_processor.get_sec_filings(ticker)
 
-                # Perform analysis
-                sec_analysis = analyzer.analyze_sec_filings(sec_filings)
-                dcf_value = analyzer.perform_dcf_analysis(financials)
-                tech_analysis = analyzer.perform_technical_analysis(stock_data)
-                insider_trades = analyzer.analyze_insider_trading(ticker)
+                    # Perform analysis
+                    sec_analysis = analyzer.analyze_sec_filings(sec_filings)
+                    dcf_value = analyzer.perform_dcf_analysis(financials)
+                    tech_analysis = analyzer.perform_technical_analysis(stock_data)
+                    insider_trades = analyzer.analyze_insider_trading(ticker)
 
-                # Summarize findings
-                findings_text = f"SEC Analysis: {sec_analysis}\nDCF Value: {dcf_value}\nTechnical Analysis: {tech_analysis}\nInsider Trades: {insider_trades}"
-                findings = analyzer.summarize_findings(findings_text)
-                analysis_results.append(findings)
+                    # Summarize findings
+                    findings_text = f"SEC Analysis: {sec_analysis}\nDCF Value: {dcf_value}\nTechnical Analysis: {tech_analysis}\nInsider Trades: {insider_trades}"
+                    findings = analyzer.summarize_findings(findings_text)
+                    analysis_results.append(findings)
+                else:
+                    print(f"Ticker {ticker} did not meet the special situation criteria.")
+            else:
+                print(f"Ticker {ticker} has market cap over $100 million or missing data.")
 
     if not analysis_results:
         print("No analysis results to process.")
@@ -190,9 +255,15 @@ def main():
     # Score recommendations
     scored_recommendations = recommender.score_recommendations(recommendations)
 
-    # Send email with recommendations
+
+    # Prepare email body
     email_body = '\n\n'.join([f"Recommendation:\n{rec['recommendation']}\nScore:\n{rec['score']}" for rec in scored_recommendations])
+
+    # Save to CSV instead of sending email
     send_email("Daily Trade Recommendations", email_body, config)
+    # # Send email with recommendations
+    # email_body = '\n\n'.join([f"Recommendation:\n{rec['recommendation']}\nScore:\n{rec['score']}" for rec in scored_recommendations])
+    # send_email("Daily Trade Recommendations", email_body, config)
 
 # Schedule the main function to run daily
 schedule.every().day.at("09:00").do(main)

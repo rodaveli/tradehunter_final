@@ -11,6 +11,8 @@ import json
 import time
 from functools import wraps
 import threading
+import csv
+from datetime import datetime
 
 CACHE_DIR = 'cache'
 
@@ -30,15 +32,29 @@ def fetch_rss_feeds(feed_urls):
             })
     return articles
 
-def send_email(subject, body, config):
-    msg = MIMEText(body)
-    msg['Subject'] = subject
-    msg['From'] = config.EMAIL_SENDER
-    msg['To'] = config.EMAIL_RECIPIENT
+# def send_email(subject, body, config):
+#     msg = MIMEText(body)
+#     msg['Subject'] = subject
+#     msg['From'] = config.EMAIL_SENDER
+#     msg['To'] = config.EMAIL_RECIPIENT
 
-    with smtplib.SMTP_SSL(config.SMTP_SERVER, config.SMTP_PORT) as server:
-        server.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
-        server.sendmail(config.EMAIL_SENDER, config.EMAIL_RECIPIENT, msg.as_string())
+#     with smtplib.SMTP_SSL(config.SMTP_SERVER, config.SMTP_PORT) as server:
+#         server.login(config.EMAIL_SENDER, config.EMAIL_PASSWORD)
+#         server.sendmail(config.EMAIL_SENDER, config.EMAIL_RECIPIENT, msg.as_string())
+
+
+def send_email(subject, body, config):
+    # Create a CSV file if it doesn't exist
+    csv_file = 'email_log.csv'
+    file_exists = os.path.isfile(csv_file)
+    
+    with open(csv_file, 'a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(['Timestamp', 'Subject', 'Body'])
+        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        writer.writerow([timestamp, subject, body])
 
 def cache_data(key, data):
     if not os.path.exists(CACHE_DIR):
