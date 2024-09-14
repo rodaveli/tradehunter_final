@@ -19,10 +19,10 @@ class Analyzer:
     def summarize_findings(self, text):
         # Use OpenRouter and FAST_LLM for summarization
         headers = {
-            "Authorization": f"Bearer {self.config['OPENROUTER_API_KEY']}",
+            "Authorization": f"Bearer {self.config.OPENROUTER_API_KEY}",
         }
         data = {
-            "model": self.config['FAST_LLM'],
+            "model": self.config.FAST_LLM,
             "messages": [
                 {"role": "user", "content": f"Summarize the following text:\n\n{text}"}
             ]

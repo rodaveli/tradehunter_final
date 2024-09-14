@@ -18,10 +18,10 @@ class Recommender:
             """
             # Use OpenRouter and SMART_LLM for generating recommendations
             headers = {
-                "Authorization": f"Bearer {self.config['OPENROUTER_API_KEY']}",
+                "Authorization": f"Bearer {self.config.OPENROUTER_API_KEY}",
             }
             data = {
-                "model": self.config['SMART_LLM'],
+                "model": self.config.SMART_LLM,
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]
@@ -50,10 +50,10 @@ class Recommender:
             """
             # Use OpenRouter and SMART_LLM for scoring
             headers = {
-                "Authorization": f"Bearer {self.config['OPENROUTER_API_KEY']}",
+                "Authorization": f"Bearer {self.config.OPENROUTER_API_KEY}",
             }
             data = {
-                "model": self.config['SMART_LLM'],
+                "model": self.config.SMART_LLM,
                 "messages": [
                     {"role": "user", "content": prompt}
                 ]

@@ -1,36 +1,25 @@
 # main.py
 
 import schedule
+import logging
 import time
-from config import *
+import config
 from utils import setup_logging, send_email, rate_limit
 from data_processing import DataProcessor
 from analysis import Analyzer
 from recommendations import Recommender
 import requests
 import json
-
-
-
-config = {
-    'OPENAI_API_KEY': OPENAI_API_KEY,
-    'OPENROUTER_API_KEY': OPENROUTER_API_KEY,
-    'EXA_API_KEY': EXA_API_KEY,
-    'EMAIL_SENDER': EMAIL_SENDER,
-    'EMAIL_PASSWORD': EMAIL_PASSWORD,
-    'EMAIL_RECIPIENT': EMAIL_RECIPIENT,
-    'SMTP_SERVER': SMTP_SERVER,
-    'SMTP_PORT': SMTP_PORT,
-    'FAST_LLM': FAST_LLM,
-    'LONG_CONTEXT_LLM': LONG_CONTEXT_LLM,
-    'SMART_LLM': SMART_LLM,
-    'RSS_FEEDS': RSS_FEEDS,
-}
-
+import argparse
+from tests import run_all_tests
+import os
+from dotenv import load_dotenv
+import sys
+from datetime import datetime
 
 @rate_limit(5)
 def is_special_situation(article_content, config):
-    # Use a fast, cheap LLM to determine if the article describes a special situation
+    logging.info("Checking if article describes a special situation")
     prompt = f"""
     Analyze the following article content and determine if it describes any of the following:
 
@@ -46,51 +35,65 @@ def is_special_situation(article_content, config):
     {{"is_special_situation": true}}
     """
     headers = {
-        "Authorization": f"Bearer {config['OPENROUTER_API_KEY']}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}"
     }
     data = {
-        "model": config['FAST_LLM'],
+        "model": config.FAST_LLM,
         "messages": [
             {"role": "system", "content": "You are a helpful assistant that analyzes text and determines if it describes a special situation, returning a JSON object."},
             {"role": "user", "content": prompt}
-        ],
-        "response_format": {"type": "json_object"}
+        ]
     }
 
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=30
+                timeout=60
             )
             response.raise_for_status()
 
             result = response.json()
             response_text = result['choices'][0]['message']['content'].strip()
+            logging.debug(f"LLM response: {response_text}")
 
             # Parse the JSON response
-            response_json = json.loads(response_text)
+            try:
+                response_json = json.loads(response_text)
+            except json.JSONDecodeError:
+                logging.error(f"Failed to parse JSON from LLM response: {response_text}")
+                return False
 
             if not isinstance(response_json, dict) or "is_special_situation" not in response_json:
-                raise ValueError("Expected a JSON object with key 'is_special_situation'")
+                logging.error(f"Unexpected response format: {response_json}")
+                return False
 
             return response_json["is_special_situation"]
 
-        except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
-            if attempt == max_retries - 1:
-                print(f"Error determining special situation after {max_retries} attempts: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error in API request: {str(e)}")
+            if hasattr(e, 'response'):
+                logging.error(f"Status code: {e.response.status_code}")
+                logging.error(f"Error message: {e.response.text}")
+            
+            if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429:
+                wait_time = 60 * (2 ** attempt)  # Start with 60 seconds, then double each time
+                logging.warning(f"Rate limit exceeded. Waiting for {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+            elif attempt == max_retries - 1:
+                logging.error(f"Error determining special situation after {max_retries} attempts")
                 return False
-            time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                time.sleep(2 ** attempt)  # Exponential backoff for other errors
 
     return False
 
 @rate_limit(5)
 def extract_tickers(article_content, config):
-    # Use a fast, cheap LLM to extract company names
+    logging.info("Extracting tickers from article content")
     prompt = f"""
     Extract all company names mentioned in the following article content.
     Provide the output as a JSON array of strings, where each string is a company name.
@@ -102,91 +105,68 @@ def extract_tickers(article_content, config):
     ["Apple Inc.", "Microsoft Corporation", "Amazon.com, Inc."]
     """
     headers = {
-        "Authorization": f"Bearer {config['OPENROUTER_API_KEY']}",
+        "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
     data = {
-        "model": config['FAST_LLM'],
+        "model": config.FAST_LLM,
         "messages": [
             {"role": "system", "content": "You are a helpful assistant that extracts company names from text and returns them in a JSON array format."},
             {"role": "user", "content": prompt}
-        ],
-        "response_format": {"type": "json_object"}
+        ]
     }
     
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=30
+                timeout=60
             )
             response.raise_for_status()
             
             result = response.json()
             company_names_json = result['choices'][0]['message']['content'].strip()
+            logging.debug(f"LLM response: {company_names_json}")
             
             # Parse the JSON response
-            company_list = json.loads(company_names_json)
+            try:
+                company_list = json.loads(company_names_json)
+            except json.JSONDecodeError:
+                logging.error(f"Failed to parse JSON from LLM response: {company_names_json}")
+                return []
             
             if not isinstance(company_list, list):
-                raise ValueError("Expected a JSON array of company names")
+                logging.error(f"Expected a JSON array of company names, got: {type(company_list)}")
+                return []
             
             tickers = []
             for company_name in company_list:
                 ticker = get_ticker(company_name)
                 if ticker:
                     tickers.append(ticker)
+            logging.info(f"Extracted tickers: {tickers}")
             return tickers
         
-        except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError) as e:
-            if attempt == max_retries - 1:
-                print(f"Error extracting company names after {max_retries} attempts: {str(e)}")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error in API request: {str(e)}")
+            if hasattr(e, 'response'):
+                logging.error(f"Status code: {e.response.status_code}")
+                logging.error(f"Error message: {e.response.text}")
+            
+            if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429:
+                wait_time = 60 * (2 ** attempt)  # Start with 60 seconds, then double each time
+                logging.warning(f"Rate limit exceeded. Waiting for {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+            elif attempt == max_retries - 1:
+                logging.error(f"Error extracting company names after {max_retries} attempts")
                 return []
-            time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                time.sleep(2 ** attempt)  # Exponential backoff for other errors
     
     return []
-
-# @rate_limit(5)
-# def extract_tickers(article_content, config):
-#     # Use a fast, cheap LLM to extract company names
-#     prompt = f"""
-#     Extract all company names mentioned in the following article content.
-
-#     Content: {article_content}
-
-#     Provide a list of company names.
-#     """
-#     headers = {
-#         "Authorization": f"Bearer {config['OPENROUTER_API_KEY']}",
-#     }
-#     data = {
-#         "model": config['FAST_LLM'],
-#         "messages": [
-#             {"role": "user", "content": prompt}
-#         ]
-#     }
-#     response = requests.post(
-#         url="https://openrouter.ai/api/v1/chat/completions",
-#         headers=headers,
-#         json=data
-#     )
-#     if response.status_code == 200:
-#         result = response.json()
-#         company_names = result['choices'][0]['message']['content'].strip()
-#         # Assuming the LLM returns company names separated by commas or newlines
-#         company_list = [name.strip() for name in company_names.split('\n') if name.strip()]
-#         tickers = []
-#         for company_name in company_list:
-#             ticker = get_ticker(company_name)
-#             if ticker:
-#                 tickers.append(ticker)
-#         return tickers
-#     else:
-#         print(f"Error extracting company names: {response.text}")
-#         return []
 
 def get_ticker(company_name):
     yfinance_url = "https://query2.finance.yahoo.com/v1/finance/search"
@@ -201,74 +181,124 @@ def get_ticker(company_name):
     except (IndexError, KeyError):
         return None
 
+class OutputRedirector:
+    def __init__(self, original_stream, log_file):
+        self.original_stream = original_stream
+        self.log_file = log_file
+
+    def write(self, text):
+        self.original_stream.write(text)
+        with open(self.log_file, 'a') as f:
+            f.write(text)
+
+    def flush(self):
+        self.original_stream.flush()
+
 def main():
+    # Set up output redirection
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = f"output_{timestamp}.txt"
+    sys.stdout = OutputRedirector(sys.stdout, log_file)
+    sys.stderr = OutputRedirector(sys.stderr, log_file)
+
+    load_dotenv()  # Load environment variables
     setup_logging()
-    data_processor = DataProcessor(config)
-    analyzer = Analyzer(config)
-    recommender = Recommender(config)
+    logging.info("Starting main process")
 
-    # Fetch RSS feeds
-    articles = data_processor.fetch_rss_articles(config['RSS_FEEDS'])
+    # Check for required environment variables
+    required_env_vars = ['OPENROUTER_API_KEY', 'EXA_API_KEY', 'FAST_LLM', 'SMART_LLM']
+    for var in required_env_vars:
+        if not os.getenv(var):
+            logging.error(f"Missing required environment variable: {var}")
+            return
 
-    # Process each article
-    analysis_results = []
-    for article in articles:
-        # Extract tickers or relevant companies from the article
-        tickers = extract_tickers(article['description'], config)
-        for ticker in tickers:
-            stock_data = data_processor.get_stock_data(ticker)
-            # Check if market cap is under $100 million
-            market_cap = stock_data.info.get('marketCap', 0)
-            if market_cap and market_cap < 100_000_000:
-                # Determine if it's a special situation or obvious price catalyst
-                if is_special_situation(article['description'], config):
-                    # Proceed with analysis
-                    financials = data_processor.get_financials(ticker)
-                    sec_filings = data_processor.get_sec_filings(ticker)
+    try:
+        data_processor = DataProcessor(config)
+        analyzer = Analyzer(config)
+        recommender = Recommender(config)
 
-                    # Perform analysis
-                    sec_analysis = analyzer.analyze_sec_filings(sec_filings)
-                    dcf_value = analyzer.perform_dcf_analysis(financials)
-                    tech_analysis = analyzer.perform_technical_analysis(stock_data)
-                    insider_trades = analyzer.analyze_insider_trading(ticker)
+        # Fetch RSS feeds
+        articles = data_processor.fetch_rss_articles(config.RSS_FEEDS)
+        logging.info(f"Fetched {len(articles)} articles from RSS feeds")
 
-                    # Summarize findings
-                    findings_text = f"SEC Analysis: {sec_analysis}\nDCF Value: {dcf_value}\nTechnical Analysis: {tech_analysis}\nInsider Trades: {insider_trades}"
-                    findings = analyzer.summarize_findings(findings_text)
-                    analysis_results.append(findings)
-                else:
-                    print(f"Ticker {ticker} did not meet the special situation criteria.")
-            else:
-                print(f"Ticker {ticker} has market cap over $100 million or missing data.")
+        # Process each article
+        analysis_results = []
+        for i, article in enumerate(articles):
+            logging.info(f"Processing article {i+1}/{len(articles)}")
+            try:
+                # Extract tickers or relevant companies from the article
+                tickers = extract_tickers(article['description'], config)
+                logging.debug(f"Extracted tickers: {tickers}")
 
-    if not analysis_results:
-        print("No analysis results to process.")
-        return
+                if not tickers:
+                    logging.info("No tickers found in article, skipping")
+                    continue
 
-    # Generate recommendations
-    recommendations = recommender.generate_trade_recommendations(analysis_results)
+                for ticker in tickers:
+                    try:
+                        stock_data = data_processor.get_stock_data(ticker)
+                        # Check if market cap is under $500 million
+                        market_cap = stock_data.info.get('marketCap')
+                        if market_cap is None:
+                            logging.warning(f"Market cap data missing for {ticker}, skipping")
+                            continue
+                        if market_cap < 500_000_000:
+                            # Determine if it's a special situation or obvious price catalyst
+                            if is_special_situation(article['description'], config):
+                                # Proceed with analysis
+                                financials = data_processor.get_financials(ticker)
+                                sec_filings = data_processor.get_sec_filings(ticker)
 
-    if not recommendations:
-        print("No recommendations generated.")
-        return
+                                # Perform analysis
+                                sec_analysis = analyzer.analyze_sec_filings(sec_filings)
+                                dcf_value = analyzer.perform_dcf_analysis(financials)
+                                tech_analysis = analyzer.perform_technical_analysis(stock_data)
+                                insider_trades = analyzer.analyze_insider_trading(ticker)
 
-    # Score recommendations
-    scored_recommendations = recommender.score_recommendations(recommendations)
+                                # Summarize findings
+                                findings_text = f"SEC Analysis: {sec_analysis}\nDCF Value: {dcf_value}\nTechnical Analysis: {tech_analysis}\nInsider Trades: {insider_trades}"
+                                findings = analyzer.summarize_findings(findings_text)
+                                analysis_results.append(findings)
+                                logging.info(f"Completed analysis for {ticker}")
+                            else:
+                                logging.info(f"Ticker {ticker} did not meet the special situation criteria")
+                        else:
+                            logging.info(f"Ticker {ticker} has market cap over $500 million, skipping")
+                    except Exception as e:
+                        logging.error(f"Error processing ticker {ticker}: {str(e)}")
+            except Exception as e:
+                logging.error(f"Error processing article: {str(e)}")
 
+        if not analysis_results:
+            logging.warning("No analysis results to process")
+            return
 
-    # Prepare email body
-    email_body = '\n\n'.join([f"Recommendation:\n{rec['recommendation']}\nScore:\n{rec['score']}" for rec in scored_recommendations])
+        # Generate recommendations
+        recommendations = recommender.generate_trade_recommendations(analysis_results)
 
-    # Save to CSV instead of sending email
-    send_email("Daily Trade Recommendations", email_body, config)
-    # # Send email with recommendations
-    # email_body = '\n\n'.join([f"Recommendation:\n{rec['recommendation']}\nScore:\n{rec['score']}" for rec in scored_recommendations])
-    # send_email("Daily Trade Recommendations", email_body, config)
+        if not recommendations:
+            logging.warning("No recommendations generated")
+            return
 
-# Schedule the main function to run daily
-schedule.every().day.at("09:00").do(main)
+        # Score recommendations
+        scored_recommendations = recommender.score_recommendations(recommendations)
+
+        # Prepare email body
+        email_body = '\n\n'.join([f"Recommendation:\n{rec['recommendation']}\nScore:\n{rec['score']}" for rec in scored_recommendations])
+
+        # Save to CSV instead of sending email
+        send_email("Daily Trade Recommendations", email_body, config)
+        logging.info("Process completed successfully")
+
+    except Exception as e:
+        logging.exception("An unexpected error occurred in the main process")
 
 if __name__ == "__main__":
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    parser = argparse.ArgumentParser(description="Run the main program or tests")
+    parser.add_argument("--test", action="store_true", help="Run tests instead of the main program")
+    args = parser.parse_args()
+
+    if args.test:
+        run_all_tests()
+    else:
+        main()
